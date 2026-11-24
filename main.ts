@@ -338,12 +338,7 @@ await runBot({
             stake = P.snipeStake;
           }
         }
-        if (want === 0 && momSignal(t, now, rqSol)) {
-          want = Math.min(P.momFirst, P.momStake);
-          kind = 'mom';
-          stake = P.momStake;
-        }
-        if (want === 0) continue;
+        if (want === 0) continue; // v3 test: momentum entry disabled — dev showed it drags PnL
         const capSol = Math.floor(Number(state.maxBuyLamports(mint))) / LAMPORTS;
         let amount = Math.min(capSol, want, stake, P.maxExposure - exposure);
         if (amount > free - tx) amount = free - tx;
