@@ -56,19 +56,26 @@ interface Held {
   lastAddPrice: number;
   lastValue: number;
   kind: 'snipe' | 'mom';
+  tookPart: boolean;
+  added: boolean;
 }
 
 const P = {
   // sniper
   snipeMaxAge: 4,
-  snipeStake: 0.1,
+  snipeStake: 0.05,
   snipeMinRq: 0.3,
   snipeMaxRq: 30,
   snipeMaxDevBuy: 2.5,
   snipeMaxBuyers: 3,
-  snipeTp: 0.15,
-  snipeSl: 0.12,
-  snipeMaxHold: 12,
+  snipeTp: 0.25,
+  snipeSl: 0.08,
+  snipeMaxHold: 20,
+  snipePartAt: 0.15,
+  snipePartFrac: 0.5,
+  snipeTrail: 0.2,
+  snipeAdd: 0.05,
+  snipeAddUp: 0.1,
   // momentum
   momWindow: 30,
   momMinNetSol: 1,
@@ -266,6 +273,23 @@ await runBot({
       let exit = h.exiting;
       const t = tapeOf(mint);
       if (h.kind === 'snipe') {
+        // Partial take-profit: bank half at +15%, let the rest ride the runner.
+        if (!h.tookPart && !h.exiting && value >= cost * (1 + P.snipePartAt)) {
+          const tokens = BigInt(pos.token_amount);
+          const part = (tokens * BigInt(Math.floor(P.snipePartFrac * 100))) / 100n;
+          if (part > 0n && part < tokens && orders.length < cap) {
+            let sellPending = false;
+            for (const po of state.pending.values()) {
+              if (po.order.mint === mint && po.order.side === 'sell') sellPending = true;
+            }
+            if (!sellPending) {
+              orders.push({ side: 'sell', mint, token_amount: part.toString(), max_slippage_bps: 10_000 });
+              h.tookPart = true;
+              h.peakValue = value * (1 - P.snipePartFrac);
+            }
+          }
+        }
+        if (h.tookPart && h.peakValue > 0 && value < h.peakValue * (1 - P.snipeTrail)) exit = true;
         if (value >= cost * (1 + P.snipeTp)) exit = true;
         if (value <= cost * (1 - P.snipeSl)) exit = true;
         if (now - h.opened > P.snipeMaxHold) exit = true;
@@ -360,10 +384,35 @@ await runBot({
           lastAddPrice: price,
           lastValue: 0,
           kind,
+          tookPart: false,
+          added: false,
         });
         t.entries++;
         slotsLeft--;
         mainLeft--;
+      } else if (h.kind === 'snipe') {
+        // One add-once: add 0.05 SOL when the launch is up 10% and flow still comes in.
+        if (h.exiting || !h.filled || h.added || h.tookPart) continue;
+        const pos = state.positions.get(mint);
+        if (pos === undefined) continue;
+        if (price < h.lastAddPrice * (1 + P.snipeAddUp)) continue;
+        if (flow(t, now, P.momWindow) < 0.5) continue;
+        if (h.invested + P.snipeAdd > P.snipeStake + P.snipeAdd + 1e-9) continue;
+        const capSol = Math.floor(Number(state.maxBuyLamports(mint))) / LAMPORTS;
+        let amount = Math.min(capSol, P.snipeAdd, P.maxExposure - exposure);
+        if (amount > free - tx) amount = free - tx;
+        if (amount < P.minBuySol) continue;
+        orders.push({
+          side: 'buy',
+          mint,
+          quote_lamports: BigInt(Math.floor(amount * LAMPORTS)),
+          max_slippage_bps: P.buySlipBps,
+        });
+        free -= amount + tx;
+        exposure += amount;
+        h.invested += amount;
+        h.lastAddPrice = price;
+        h.added = true;
       } else if (h.kind === 'mom') {
         // Pyramid momentum into strength only.
         if (h.exiting || !h.filled) continue;
